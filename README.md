@@ -23,62 +23,72 @@ E:/DoAnBigData/
 
 ---
 
-## A) Chạy bằng Docker (Khuyến nghị)
+## A) Chạy bằng Docker + Jupyter (Khuyến nghị)
 
-Yêu cầu có sẵn cụm Spark + Hadoop + container `jupyter_app` trong cùng mạng Docker.
+Sử dụng **Jupyter** làm điểm điều khiển chính (mở terminal bên trong Jupyter để chạy Streamlit). Cụm Spark + HDFS + `jupyter_app` cùng mạng Docker.
 
 ### A1) Khởi động cụm
 
 ```bash
 docker compose up -d spark-master spark-worker namenode datanode jupyter_app
 
-docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+docker ps --format "table {{.Names}}	{{.Status}}	{{.Ports}}"
 ```
 
-* **Jupyter**: [http://localhost:8888](http://localhost:8888)
-* **Streamlit**: [http://localhost:8501](http://localhost:8501)
+* **Jupyter (Lab)**: [http://localhost:8888](http://localhost:8888)
 
-### A2) Cài đặt thư viện Python trong container `jupyter_app`
+  * Token đăng nhập (nếu dùng compose như mẫu): **bigdata**
+* **Streamlit**: sẽ chạy **bên trong** Jupyter (qua Terminal) và lộ cổng [http://localhost:8501](http://localhost:8501)
+
+### A2) Mở Jupyter và tạo Terminal
+
+1. Vào [http://localhost:8888](http://localhost:8888) → nhập token **bigdata** → vào **JupyterLab**.
+2. Ở Launcher (màn hình chính), bấm **Terminal** (hoặc `File → New → Terminal`).
+
+### A3) Cài thư viện trong Terminal Jupyter
+
+Trong cửa sổ Terminal (bạn đang ở trong container `jupyter_app`):
 
 ```bash
-docker exec -it jupyter_app bash -lc "pip install -U pip && pip install -r /home/jovyan/work/requirements.txt"
-# Nếu chưa có requirements.txt: pip install streamlit pandas matplotlib pyspark==3.3.0
+pip install -U pip
+# Cài từ requirements.txt nằm trong /home/jovyan/work
+pip install -r /home/jovyan/work/requirements.txt
+# Nếu chưa có requirements.txt, có thể cài trực tiếp:
+# pip install streamlit pandas matplotlib pyspark==3.3.0
 ```
 
-### A3) Tải dữ liệu lên HDFS
+### A4) Tải dataset lên HDFS (chạy ngay trong Terminal Jupyter)
 
 ```bash
-docker exec -it jupyter_app bash -lc "\
-  hdfs dfs -mkdir -p /input && \
-  hdfs dfs -put -f /home/jovyan/work/ecommerce_data.csv /input/ && \
-  hdfs dfs -ls /input"
+hdfs dfs -mkdir -p /input
+hdfs dfs -put -f /home/jovyan/work/ecommerce_data.csv /input/
+hdfs dfs -ls /input
 ```
 
-### A4) Chạy ứng dụng Streamlit
+### A5) Chạy ứng dụng Streamlit từ Terminal Jupyter
 
 ```bash
-docker exec -it jupyter_app bash -lc "cd /home/jovyan/work && python -m streamlit run main.py --server.address=0.0.0.0 --server.port=8501"
+cd /home/jovyan/work
+python -m streamlit run main.py --server.address=0.0.0.0 --server.port=8501
 ```
 
-Sau đó mở [http://localhost:8501](http://localhost:8501)
+Mở trình duyệt: **[http://localhost:8501](http://localhost:8501)**
 
-### A5) Cấu hình sidebar (Docker mode)
+### A6) Cấu hình sidebar (Jupyter + Docker)
 
 * **Spark master**: `spark://spark-master:7077`
 * **CSV HDFS path**: `hdfs://namenode:8020/input/ecommerce_data.csv`
 * **Parquet output**: `hdfs://namenode:8020/warehouse/ecommerce_parquet`
-* **Định dạng thời gian**: `M/d/yyyy H:mm` (ví dụ: `9/8/2020 9:38`)
+* **Định dạng thời gian**: `M/d/yyyy H:mm`  (ví dụ: `9/8/2020 9:38`)
 
-### A6) Quy trình thao tác
+### A7) Quy trình thao tác
 
-1. Nhấn **Khởi tạo SparkSession** (Restart Spark nếu cần)
-2. Chạy **ETL** (đọc CSV, chuẩn hóa, ghi Parquet theo ngày)
-3. Chạy **Analytics** (hiển thị KPI, biểu đồ, top category/payment)
-4. Chạy **Phân cụm khách hàng (KMeans)** — tự động chọn k tốt nhất, hiển thị:
+1. **Khởi tạo/Restart SparkSession** ở sidebar.
+2. **Chạy ETL** (CSV → làm sạch → Parquet partition theo `purchase_date`, ghi đè).
+3. **Chạy Analytics** (KPI, biểu đồ).
+4. **Phân cụm KMeans** (auto chọn k theo Silhouette) → xem **bảng điểm Silhouette**, **danh sách khách hàng theo cụm** và **Cluster Profile**.
 
-   * Bảng điểm Silhouette theo k
-   * Danh sách khách hàng & cụm
-   * Bảng **Hồ sơ cụm (Cluster Profile)**: trung bình R/F/M, số khách hàng
+> **Mẹo:** Nếu bạn thích thao tác mọi thứ ngoài Jupyter, có thể dùng lệnh `docker exec` tương đương từ host. Tuy nhiên, cách ở trên giúp bạn “tất cả trong Jupyter”.
 
 ---
 
