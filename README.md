@@ -120,6 +120,66 @@ streamlit run main.py
 
 ---
 
+## C) Cài đặt Docker Desktop
+
+Nếu bạn chưa có Docker, làm theo các bước sau để chạy được cụm Spark + HDFS + Streamlit.
+
+### C1) Tải và cài Docker Desktop
+
+1. Mở: [https://www.docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop)
+2. Chọn đúng hệ điều hành:
+
+   * **Windows 10/11** (64-bit) → Docker Desktop for Windows *(yêu cầu WSL2)*
+   * **macOS (Intel/M1/M2)** → Docker Desktop for Mac
+   * **Linux** → cài `docker` và `docker-compose` qua terminal theo distro
+3. Cài xong, mở Docker Desktop và chờ biểu tượng cá voi 🐳 báo **Running**.
+4. Kiểm tra trong terminal:
+
+   ```bash
+   docker --version
+   docker compose version
+   ```
+
+### C2) Cấu hình WSL2 (Windows)
+
+1. PowerShell (Run as Administrator):
+
+   ```bash
+   wsl --install
+   ```
+
+   Khởi động lại máy nếu được yêu cầu.
+2. Đặt WSL2 mặc định:
+
+   ```bash
+   wsl --set-default-version 2
+   ```
+3. Docker Desktop → **Settings → General**: bật
+
+   * *Use the WSL 2 based engine*
+   * *Start Docker Desktop when you log in*
+4. **Settings → Resources → WSL Integration**: bật tích cho distro (ví dụ **Ubuntu**).
+
+### C3) Chạy thử container mẫu
+
+```bash
+docker run hello-world
+```
+
+Nếu in thông điệp *Hello from Docker!* → Docker đã hoạt động đúng.
+
+### C4) Chạy cụm Hadoop + Spark + Jupyter của dự án
+
+Tại thư mục dự án có `docker-compose.yml`:
+
+```bash
+docker compose up -d
+```
+
+Các dịch vụ sẽ khởi chạy: **namenode, datanode, spark-master, spark-worker, jupyter_app**.
+
+---
+
 ## Tính năng chính
 
 * Làm sạch dữ liệu, xử lý null, chuyển đổi thời gian, ghi Parquet phân vùng theo ngày.
