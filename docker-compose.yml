@@ -50,7 +50,10 @@ services:
       - bigdata_network
 
   jupyter_app:
-    image: jupyter/pyspark-notebook:hadoop-3
+    build:
+      context: E:/DoAnBigData
+      dockerfile: Dockerfile
+    image: ecom-jupyter:latest
     container_name: jupyter_app
     depends_on:
       - spark-master
