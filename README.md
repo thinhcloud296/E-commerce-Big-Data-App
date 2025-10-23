@@ -30,14 +30,12 @@ Sử dụng **Jupyter** làm điểm điều khiển chính (mở terminal bên 
 ### A1) Khởi động cụm
 
 ```bash
-docker compose up -d spark-master spark-worker namenode datanode jupyter_app
-
-docker ps --format "table {{.Names}}	{{.Status}}	{{.Ports}}"
+docker compose up -d
 ```
 
 * **Jupyter (Lab)**: [http://localhost:8888](http://localhost:8888)
 
-  * Token đăng nhập (nếu dùng compose như mẫu): **bigdata**
+  * Token đăng nhập : **bigdata**
 * **Streamlit**: sẽ chạy **bên trong** Jupyter (qua Terminal) và lộ cổng [http://localhost:8501](http://localhost:8501)
 
 ### A2) Mở Jupyter và tạo Terminal
@@ -45,19 +43,7 @@ docker ps --format "table {{.Names}}	{{.Status}}	{{.Ports}}"
 1. Vào [http://localhost:8888](http://localhost:8888) → nhập token **bigdata** → vào **JupyterLab**.
 2. Ở Launcher (màn hình chính), bấm **Terminal** (hoặc `File → New → Terminal`).
 
-### A3) Cài thư viện trong Terminal Jupyter
-
-Trong cửa sổ Terminal (bạn đang ở trong container `jupyter_app`):
-
-```bash
-pip install -U pip
-# Cài từ requirements.txt nằm trong /home/jovyan/work
-pip install -r /home/jovyan/work/requirements.txt
-# Nếu chưa có requirements.txt, có thể cài trực tiếp:
-# pip install streamlit pandas matplotlib pyspark==3.3.0
-```
-
-### A4) Tải dataset lên HDFS (chạy ngay trong Terminal Jupyter)
+### A3) Tải dataset lên HDFS (chạy ngay trong Terminal Jupyter)
 
 ```bash
 hdfs dfs -mkdir -p /input
@@ -65,7 +51,7 @@ hdfs dfs -put -f /home/jovyan/work/ecommerce_data.csv /input/
 hdfs dfs -ls /input
 ```
 
-### A5) Chạy ứng dụng Streamlit từ Terminal Jupyter
+### A4) Chạy ứng dụng Streamlit từ Terminal Jupyter
 
 ```bash
 cd /home/jovyan/work
@@ -74,14 +60,14 @@ python -m streamlit run main.py --server.address=0.0.0.0 --server.port=8501
 
 Mở trình duyệt: **[http://localhost:8501](http://localhost:8501)**
 
-### A6) Cấu hình sidebar (Jupyter + Docker)
+### A5) Cấu hình sidebar (Jupyter + Docker)
 
 * **Spark master**: `spark://spark-master:7077`
 * **CSV HDFS path**: `hdfs://namenode:8020/input/ecommerce_data.csv`
 * **Parquet output**: `hdfs://namenode:8020/warehouse/ecommerce_parquet`
 * **Định dạng thời gian**: `M/d/yyyy H:mm`  (ví dụ: `9/8/2020 9:38`)
 
-### A7) Quy trình thao tác
+### A6) Quy trình thao tác
 
 1. **Khởi tạo/Restart SparkSession** ở sidebar.
 2. **Chạy ETL** (CSV → làm sạch → Parquet partition theo `purchase_date`, ghi đè).
@@ -89,44 +75,6 @@ Mở trình duyệt: **[http://localhost:8501](http://localhost:8501)**
 4. **Phân cụm KMeans** (auto chọn k theo Silhouette) → xem **bảng điểm Silhouette**, **danh sách khách hàng theo cụm** và **Cluster Profile**.
 
 > **Mẹo:** Nếu bạn thích thao tác mọi thứ ngoài Jupyter, có thể dùng lệnh `docker exec` tương đương từ host. Tuy nhiên, cách ở trên giúp bạn “tất cả trong Jupyter”.
-
----
-
-## B) Chạy local bằng Conda (không cần Docker)
-
-Dành cho demo đơn giản không dùng HDFS.
-
-### B1) Tạo môi trường
-
-```bash
-conda create -n ecom-bigdata python=3.10 -y
-conda activate ecom-bigdata
-conda install -c conda-forge openjdk=8 -y
-pip install -U pip
-pip install -r requirements.txt
-```
-
-> Nếu bị lỗi Java, thêm biến môi trường trong PowerShell:
-
-```powershell
-$env:JAVA_HOME = $env:CONDA_PREFIX
-$env:PATH = "$env:JAVA_HOME\Library\bin;$env:JAVA_HOME\bin;$env:PATH"
-java -version
-```
-
-### B2) Chạy ứng dụng
-
-```bash
-cd E:/DoAnBigData
-streamlit run main.py
-```
-
-### B3) Cấu hình sidebar (local)
-
-* **Spark master**: `local[*]`
-* **CSV path**: `file:///E:/DoAnBigData/ecommerce_data.csv`
-* **Parquet output**: `file:///E:/DoAnBigData/ecommerce_parquet`
-* **Định dạng thời gian**: `M/d/yyyy H:mm`
 
 ---
 
@@ -252,23 +200,6 @@ streamlit
 pyspark==3.3.0
 pandas
 matplotlib
-```
-
-### environment.yml
-
-```yaml
-name: ecom-bigdata
-channels:
-  - conda-forge
-dependencies:
-  - python=3.10
-  - openjdk=8
-  - pip
-  - pip:
-      - streamlit
-      - pyspark==3.3.0
-      - pandas
-      - matplotlib
 ```
 
 ---
