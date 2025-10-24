@@ -457,6 +457,104 @@ def run_analytics(spark, parquet_path: str):
             ax10.set_xlabel("Tuổi"); ax10.set_ylabel("Tần suất")
             st.pyplot(fig10)
 
+
+# ==================================================
+# 🧩 PHÂN TÍCH XU HƯỚNG MUA SẮM (Trend Analysis)
+# ==================================================
+def run_trend_analysis(df):
+    st.subheader("📈 Phân tích xu hướng mua sắm")
+
+    # Doanh thu theo tháng
+    monthly_rev = (df.withColumn("month", date_format("purchase_ts", "yyyy-MM"))
+                     .groupBy("month")
+                     .agg(_sum("total_amount").alias("revenue"))
+                     .orderBy("month"))
+
+    pandas_monthly = monthly_rev.toPandas()
+    if not pandas_monthly.empty:
+        st.markdown("**Biểu đồ doanh thu theo tháng**")
+        st.line_chart(pandas_monthly.set_index("month")["revenue"])
+    else:
+        st.warning("Không có dữ liệu doanh thu theo tháng.")
+
+    # Top 5 danh mục sản phẩm
+    top_cat = (df.groupBy("product_category")
+                 .agg(_sum("total_amount").alias("revenue"))
+                 .orderBy(F.desc("revenue"))
+                 .limit(5))
+
+    pandas_cat = top_cat.toPandas()
+    if not pandas_cat.empty:
+        st.markdown("**Top 5 danh mục sản phẩm có doanh thu cao nhất**")
+        st.bar_chart(pandas_cat.set_index("product_category")["revenue"])
+
+    # Phương thức thanh toán phổ biến
+    pay_method = (df.groupBy("payment_method")
+                    .agg(count("*").alias("count"))
+                    .orderBy(F.desc("count")))
+    pandas_pay = pay_method.toPandas()
+    if not pandas_pay.empty:
+        st.markdown("**Phân bố phương thức thanh toán**")
+        fig, ax = plt.subplots()
+        ax.pie(
+            pandas_pay["count"],
+            labels=pandas_pay["payment_method"],
+            autopct="%1.1f%%",
+            startangle=140,
+        )
+        ax.axis("equal")
+        st.pyplot(fig)
+
+
+# ==================================================
+# 🧠 PHÂN TÍCH HÀNH VI NGƯỜI DÙNG (Customer Behavior)
+# ==================================================
+def run_customer_behavior(df):
+    st.subheader("🧠 Phân tích hành vi người dùng (RFM)")
+
+    # Chuẩn bị dữ liệu
+    rfm_df = (df.groupBy("customer_id")
+                .agg(
+                    F.max("purchase_ts").alias("last_purchase"),
+                    count("*").alias("frequency"),
+                    _sum("total_amount").alias("monetary")
+                ))
+    max_date = df.agg(F.max("purchase_ts")).collect()[0][0]
+    rfm_df = rfm_df.withColumn(
+        "recency_days", F.datediff(F.lit(max_date), F.col("last_purchase"))
+    )
+
+    pandas_rfm = rfm_df.toPandas()
+    if pandas_rfm.empty:
+        st.warning("Không có dữ liệu hành vi người dùng để phân tích.")
+        return
+
+    # Biểu đồ phân tán R-F-M
+    st.markdown("**Phân bố RFM của khách hàng**")
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sc = ax.scatter(
+        pandas_rfm["recency_days"],
+        pandas_rfm["frequency"],
+        c=pandas_rfm["monetary"],
+        cmap="viridis",
+        alpha=0.7,
+    )
+    plt.xlabel("Recency (days)")
+    plt.ylabel("Frequency")
+    plt.title("Hành vi mua sắm khách hàng (RFM)")
+    plt.colorbar(sc, label="Monetary (Tổng chi tiêu)")
+    st.pyplot(fig)
+
+    # Bảng thống kê trung bình
+    st.markdown("**Thống kê trung bình RFM**")
+    st.dataframe(
+        pandas_rfm[["recency_days", "frequency", "monetary"]]
+        .describe()
+        .T
+        .rename(columns={"mean": "Giá trị trung bình"})
+    )
+
+
 # =========================
 # ML: KMeans Customer Segmentation (RFM nhẹ)
 # =========================
@@ -638,7 +736,26 @@ if st.button("Chạy Analytics"):
         st.error(f"Lỗi Analytics: {e}")
         st.code(traceback.format_exc())
 
-st.markdown("### 3) Machine Learning")
+st.markdown("### 3) Phân tích nâng cao")
+    if st.button("📊 Phân tích xu hướng mua sắm"):
+        try:
+            spark = start_spark(log_level=log_level)
+            df = spark.read.parquet(ppath)
+            run_trend_analysis(df)
+        except Exception as e:
+            st.error(f"Lỗi khi phân tích xu hướng: {e}")
+            st.code(traceback.format_exc())
+
+    if st.button("🧠 Phân tích hành vi người dùng"):
+        try:
+            spark = start_spark(log_level=log_level)
+            df = spark.read.parquet(ppath)
+            run_customer_behavior(df)
+        except Exception as e:
+            st.error(f"Lỗi khi phân tích hành vi người dùng: {e}")
+            st.code(traceback.format_exc())
+
+st.markdown("### 4) Machine Learning")
 
 if st.button("Phân cụm khách hàng (KMeans)"):
     try:
