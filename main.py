@@ -1,21 +1,13 @@
-# Big Data App cho dataset: E-commerce Customer Behavior and Purchase
-# - Đọc CSV từ HDFS: hdfs://namenode:8020/input/ecommerce_data.csv
-# - ETL -> Parquet (partition theo PurchaseDate)
-# - Analytics: KPI, Top Category/Payment, Revenue theo ngày
-# - ML: Logistic Regression dự đoán Churn; KMeans phân cụm khách hàng (RFM đơn giản)
-#
-# Yêu cầu môi trường:
-#   - Spark master: spark://spark-master:7077 (có thể đổi trong sidebar)
-#   - HDFS: namenode:8020
-#   - pip install streamlit pyspark pandas matplotlib
-
 import os
 import traceback
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+import numpy as np
 from pyspark.sql import functions as F
-
+from pyspark.sql.window import Window
+from pyspark.ml.feature import StringIndexer, VectorAssembler, StandardScaler
+from pyspark.ml.clustering import KMeans
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, DoubleType
@@ -31,7 +23,7 @@ from pyspark.sql.functions import (
 # Config mặc định
 # =========================
 DEFAULT_SPARK_MASTER = os.getenv("SPARK_MASTER_URL", os.getenv("SPARK_MASTER", "spark://spark-master:7077"))
-DEFAULT_INPUT = "hdfs://namenode:8020/input/ecommerce_data.csv"
+DEFAULT_INPUT = "hdfs://namenode:8020/input/ecommerce.csv"
 DEFAULT_WAREHOUSE = os.getenv("WAREHOUSE_PATH", "hdfs://namenode:8020/warehouse")
 DEFAULT_OUTPUT = os.getenv("OUTPUT_PATH", "hdfs://namenode:8020/output")
 PARQUET_DIR = f"{DEFAULT_WAREHOUSE.rstrip('/')}/ecommerce_parquet"
@@ -330,48 +322,50 @@ def run_analytics(spark, parquet_path: str):
     else:
         st.write("Không đủ cột để tính KPI.")
 
-    # —— Revenue theo ngày ——
+    # —— Doanh thu theo ngày (Biểu đồ tương tác của Streamlit) ——
     if "purchase_date" in df.columns and "total_amount" in df.columns:
-        st.markdown("### Doanh thu theo ngày")
-        rev_day = (df.groupBy("purchase_date")
-                     .agg(_sum("total_amount").alias("revenue"),
-                          count("*").alias("orders"))
-                     .orderBy("purchase_date"))
-        pdf = rev_day.toPandas()
+        st.markdown("### Doanh thu & Đơn hàng theo ngày")
 
-        st.dataframe(pdf, use_container_width=True)
+        daily = (
+            df.groupBy("purchase_date")
+              .agg(_sum("total_amount").alias("revenue"),
+                   count("*").alias("orders"))
+              .orderBy("purchase_date")
+        )
+        pdf = daily.toPandas()
 
-        if not pdf.empty and pdf["purchase_date"].notna().any():
-            fig, ax = plt.subplots()
-            ax.plot(pdf["purchase_date"].astype(str), pdf["revenue"])
-            ax.set_title("Revenue theo ngày")
-            ax.set_xlabel("Ngày"); ax.set_ylabel("Revenue")
-            plt.xticks(rotation=45, ha='right')
-            st.pyplot(fig)
-
-            # Orders theo ngày
-            fig2, ax2 = plt.subplots()
-            ax2.plot(pdf["purchase_date"].astype(str), pdf["orders"])
-            ax2.set_title("Số đơn theo ngày")
-            ax2.set_xlabel("Ngày"); ax2.set_ylabel("Orders")
-            plt.xticks(rotation=45, ha='right')
-            st.pyplot(fig2)
-
-            # AOV theo ngày (Average Order Value)
-            pdf["aov"] = pdf["revenue"] / pdf["orders"].replace(0, float("nan"))
-            fig3, ax3 = plt.subplots()
-            ax3.plot(pdf["purchase_date"].astype(str), pdf["aov"])
-            ax3.set_title("AOV theo ngày")
-            ax3.set_xlabel("Ngày"); ax3.set_ylabel("AOV")
-            plt.xticks(rotation=45, ha='right')
-            st.pyplot(fig3)
-        else:
+        if pdf.empty or pdf["purchase_date"].isna().all():
             st.warning("Không có dữ liệu ngày (có thể do không parse được 'Purchase Date').")
+        else:
+            # Chuẩn hoá thời gian & sort
+            pdf["purchase_date"] = pd.to_datetime(pdf["purchase_date"], errors="coerce")
+            pdf = pdf.dropna(subset=["purchase_date"]).sort_values("purchase_date")
+            
+            if pdf.empty:
+                st.warning("Không có bản ghi hợp lệ sau khi chuẩn hoá thời gian.")
+            else:
+                # Tính đường trung bình trượt cho Revenue
+                pdf["rev_ma7"] = pdf["revenue"].rolling(7, min_periods=1).mean()
+                
+                # Đặt 'purchase_date' làm index để Streamlit vẽ biểu đồ
+                pdf_indexed = pdf.set_index("purchase_date")
+
+                # --- Biểu đồ 1: Doanh thu (Revenue) ---
+                st.markdown("#### Xu hướng doanh thu (Revenue & MA-7)")
+                st.write("Biểu đồ đường thể hiện doanh thu hàng ngày và đường trung bình trượt 7 ngày (MA-7).")
+                # st.line_chart sẽ tự động vẽ 2 cột 'revenue' và 'rev_ma7'
+                st.line_chart(pdf_indexed[["revenue", "rev_ma7"]])
+
+                # --- Biểu đồ 2: Số lượng đơn hàng (Orders) ---
+                st.markdown("#### Số lượng đơn hàng hàng ngày")
+                st.write("Biểu đồ cột thể hiện tổng số đơn hàng mỗi ngày.")
+                st.bar_chart(pdf_indexed[["orders"]])
+
 
     # —— Top Category theo số đơn & doanh thu ——
     if "product_category" in df.columns:
         st.markdown("### Top Category")
-        top_n = st.slider("Số lượng Top", 5, 30, 10, key="top_cat")
+        top_n = 10
         top_cat = (df.groupBy("product_category")
                      .agg(count("*").alias("cnt"), _sum("total_amount").alias("revenue"))
                      .orderBy(col("cnt").desc())
@@ -380,21 +374,22 @@ def run_analytics(spark, parquet_path: str):
         st.dataframe(pdf, use_container_width=True)
 
         if not pdf.empty:
-            # theo số đơn
+            # theo số đơn (barh, dễ đọc label dài)
+            pdf_cnt = pdf.sort_values("cnt", ascending=True)
             fig4, ax4 = plt.subplots()
-            ax4.bar(pdf["product_category"].astype(str), pdf["cnt"])
+            ax4.barh(pdf_cnt["product_category"].astype(str), pdf_cnt["cnt"])
             ax4.set_title(f"Top {top_n} Category (theo số đơn)")
-            ax4.set_xlabel("Category"); ax4.set_ylabel("Count")
-            plt.xticks(rotation=45, ha='right')
+            ax4.set_xlabel("Count"); ax4.set_ylabel("Category")
             st.pyplot(fig4)
 
-            # theo doanh thu
+            # theo doanh thu (barh)
+            pdf_rev = pdf.sort_values("revenue", ascending=True)
             fig5, ax5 = plt.subplots()
-            ax5.bar(pdf["product_category"].astype(str), pdf["revenue"])
+            ax5.barh(pdf_rev["product_category"].astype(str), pdf_rev["revenue"])
             ax5.set_title(f"Top {top_n} Category (theo doanh thu)")
-            ax5.set_xlabel("Category"); ax5.set_ylabel("Revenue")
-            plt.xticks(rotation=45, ha='right')
+            ax5.set_xlabel("Revenue"); ax5.set_ylabel("Category")
             st.pyplot(fig5)
+
 
     # —— Phương thức thanh toán ——
     if "payment_method" in df.columns:
@@ -426,13 +421,19 @@ def run_analytics(spark, parquet_path: str):
         rate = (df.groupBy("purchase_date")
                   .agg(avg(col("returns").cast("double")).alias("return_rate"))
                   .orderBy("purchase_date")).toPandas()
+        
         if not rate.empty and rate["purchase_date"].notna().any():
-            fig8, ax8 = plt.subplots()
-            ax8.plot(rate["purchase_date"].astype(str), rate["return_rate"])
-            ax8.set_title("Tỉ lệ trả hàng theo ngày")
-            ax8.set_xlabel("Ngày"); ax8.set_ylabel("Return rate")
-            plt.xticks(rotation=45, ha='right')
-            st.pyplot(fig8)
+            # Chuẩn hoá thời gian & set index
+            rate["purchase_date"] = pd.to_datetime(rate["purchase_date"], errors="coerce")
+            rate = rate.dropna(subset=["purchase_date"]).set_index("purchase_date")
+            
+            if not rate.empty:
+                st.write("Biểu đồ đường thể hiện tỉ lệ trả hàng (return rate) theo thời gian.")
+                st.line_chart(rate[["return_rate"]])
+            else:
+                st.warning("Không có dữ liệu tỉ lệ trả hàng hợp lệ sau khi chuẩn hoá thời gian.")
+        else:
+            st.warning("Không có dữ liệu để vẽ biểu đồ tỉ lệ trả hàng.")
 
     if "churn" in df.columns and "gender" in df.columns:
         st.markdown("### Tỉ lệ churn theo giới tính")
@@ -452,11 +453,31 @@ def run_analytics(spark, parquet_path: str):
         st.markdown("### Phân bố độ tuổi khách hàng")
         age_pdf = df.select("customer_age").toPandas().dropna()
         if not age_pdf.empty:
-            fig10, ax10 = plt.subplots()
-            ax10.hist(age_pdf["customer_age"], bins=20)
-            ax10.set_title("Histogram độ tuổi")
-            ax10.set_xlabel("Tuổi"); ax10.set_ylabel("Tần suất")
-            st.pyplot(fig10)
+            data = age_pdf["customer_age"].astype(float)
+            # Lọc ra các giá trị tuổi hợp lệ (ví dụ: 0-100) để tránh làm hỏng biểu đồ
+            data = data[(data > 0) & (data < 100)] 
+            
+            if len(data) > 0:
+                # Tính số bins (nhóm)
+                bins_count = int(np.clip(np.sqrt(len(data)), 10, 40)) # sqrt(n) trong [10..40]
+                
+                # Tính toán giá trị histogram (tần suất và các cạnh của bin)
+                hist, bin_edges = np.histogram(data, bins=bins_count)
+                
+                # Tạo DataFrame cho st.bar_chart
+                # Lấy nhãn là điểm giữa của mỗi bin để biểu đồ hiển thị đúng
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                hist_df = pd.DataFrame({
+                    'age_center': bin_centers, # Trục X: Tuổi (trung tâm nhóm)
+                    'count': hist              # Trục Y: Số lượng khách hàng
+                }).set_index('age_center')
+                
+                st.write(f"Biểu đồ cột thể hiện tần suất khách hàng theo các nhóm tuổi (chia thành {bins_count} nhóm).")
+                st.bar_chart(hist_df[['count']])
+            else:
+                st.warning("Không có dữ liệu tuổi hợp lệ (0-100) để vẽ biểu đồ phân bố.")
+        else:
+            st.warning("Không có dữ liệu tuổi để vẽ biểu đồ phân bố.")
 
 
 # ==================================================
@@ -465,16 +486,39 @@ def run_analytics(spark, parquet_path: str):
 def run_trend_analysis(df):
     st.subheader("📈 Phân tích xu hướng mua sắm")
 
-    # Doanh thu theo tháng
+        # Doanh thu theo tháng
     monthly_rev = (df.withColumn("month", date_format("purchase_ts", "yyyy-MM"))
                      .groupBy("month")
                      .agg(_sum("total_amount").alias("revenue"))
                      .orderBy("month"))
 
     pandas_monthly = monthly_rev.toPandas()
+
     if not pandas_monthly.empty:
-        st.markdown("**Biểu đồ doanh thu theo tháng**")
-        st.line_chart(pandas_monthly.set_index("month")["revenue"])
+        import matplotlib.dates as mdates
+
+        # Chuẩn hoá mốc tháng, điền tháng trống = 0
+        pandas_monthly["month"] = pd.to_datetime(pandas_monthly["month"], format="%Y-%m", errors="coerce")
+        pandas_monthly = pandas_monthly.dropna(subset=["month"]).sort_values("month")
+
+        if not pandas_monthly.empty:
+            # Reindex theo dải tháng đầy đủ
+            full_range = pd.period_range(
+                pandas_monthly["month"].min().to_period("M"),
+                pandas_monthly["month"].max().to_period("M"),
+                freq="M"
+            ).to_timestamp()
+            pm = pandas_monthly.set_index("month").reindex(full_range, fill_value=0).rename_axis("month").reset_index()
+
+            fig, ax = plt.subplots()
+            ax.plot(pm["month"], pm["revenue"], linewidth=2)
+            locator = mdates.AutoDateLocator(minticks=4, maxticks=12)
+            formatter = mdates.ConciseDateFormatter(locator)
+            ax.xaxis.set_major_locator(locator)
+            ax.xaxis.set_major_formatter(formatter)
+            ax.set_title("Doanh thu theo tháng")
+            ax.set_xlabel("Tháng"); ax.set_ylabel("Revenue")
+            st.pyplot(fig)
     else:
         st.warning("Không có dữ liệu doanh thu theo tháng.")
 
@@ -489,7 +533,7 @@ def run_trend_analysis(df):
         st.markdown("**Top 5 danh mục sản phẩm có doanh thu cao nhất**")
         st.bar_chart(pandas_cat.set_index("product_category")["revenue"])
 
-    # Phương thức thanh toán phổ biến
+        # Phương thức thanh toán phổ biến (bar chart thay vì pie)
     pay_method = (df.groupBy("payment_method")
                     .agg(count("*").alias("count"))
                     .orderBy(F.desc("count")))
@@ -497,14 +541,12 @@ def run_trend_analysis(df):
     if not pandas_pay.empty:
         st.markdown("**Phân bố phương thức thanh toán**")
         fig, ax = plt.subplots()
-        ax.pie(
-            pandas_pay["count"],
-            labels=pandas_pay["payment_method"],
-            autopct="%1.1f%%",
-            startangle=140,
-        )
-        ax.axis("equal")
+        ax.bar(pandas_pay["payment_method"].astype(str), pandas_pay["count"])
+        ax.set_title("Số đơn theo phương thức thanh toán")
+        ax.set_xlabel("Payment Method"); ax.set_ylabel("Count")
+        plt.xticks(rotation=45, ha='right')
         st.pyplot(fig)
+
 
 
 # ==================================================
@@ -520,7 +562,13 @@ def run_customer_behavior(df):
                     count("*").alias("frequency"),
                     _sum("total_amount").alias("monetary")
                 ))
-    max_date = df.agg(F.max("purchase_ts")).collect()[0][0]
+    
+    max_date_row = df.agg(F.max("purchase_ts")).collect()
+    if not max_date_row or max_date_row[0][0] is None:
+        st.error("Không thể tính toán RFM do thiếu mốc thời gian (max_date). Kiểm tra lại dữ liệu 'Purchase Date'.")
+        return
+    max_date = max_date_row[0][0]
+        
     rfm_df = rfm_df.withColumn(
         "recency_days", F.datediff(F.lit(max_date), F.col("last_purchase"))
     )
@@ -532,7 +580,7 @@ def run_customer_behavior(df):
         return
 
     # Biểu đồ phân tán R-F-M
-    st.markdown("**Phân bố RFM của khách hàng**")
+    st.markdown("**Phân bố RFM của khách hàng (Tổng quan)**")
     fig, ax = plt.subplots(figsize=(8, 6))
     sc = ax.scatter(
         pandas_rfm["recency_days"],
@@ -543,9 +591,58 @@ def run_customer_behavior(df):
     )
     plt.xlabel("Recency (days)")
     plt.ylabel("Frequency")
-    plt.title("Hành vi mua sắm khách hàng (RFM)")
+    plt.title("Hành vi mua sắm khách hàng (R vs F, màu là M)")
     plt.colorbar(sc, label="Monetary (Tổng chi tiêu)")
     st.pyplot(fig)
+
+    # --- Thêm biểu đồ phân bố chi tiết ---
+    st.markdown("**Phân bố chi tiết của Recency, Frequency, và Monetary**")
+    
+    # Chia layout thành 3 cột để hiển thị biểu đồ
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.markdown("#### Recency (Số ngày từ lần mua cuối)")
+        fig_r, ax_r = plt.subplots()
+        ax_r.hist(pandas_rfm['recency_days'].dropna(), bins=30, color='skyblue', edgecolor='black')
+        ax_r.set_title("Phân bố Recency")
+        ax_r.set_xlabel("Số ngày")
+        ax_r.set_ylabel("Số lượng khách hàng")
+        st.pyplot(fig_r)
+
+    with col2:
+        st.markdown("#### Frequency (Tổng số lần mua)")
+        # Lấy dữ liệu F, lọc các giá trị ngoại lệ (ví dụ: > 99th percentile) để biểu đồ dễ nhìn hơn
+        f_data = pandas_rfm['frequency'].dropna()
+        if not f_data.empty:
+            f_q99 = f_data.quantile(0.99)
+            f_data_clipped = f_data[f_data <= f_q99]
+            
+            fig_f, ax_f = plt.subplots()
+            ax_f.hist(f_data_clipped, bins=30, color='lightgreen', edgecolor='black')
+            ax_f.set_title(f"Phân bố Frequency (lọc giá trị > {f_q99:.0f})")
+            ax_f.set_xlabel("Số lần mua")
+            ax_f.set_ylabel("Số lượng khách hàng")
+            st.pyplot(fig_f)
+        else:
+            st.write("Không có dữ liệu Frequency.")
+
+    with col3:
+        st.markdown("#### Monetary (Tổng chi tiêu)")
+        # Lọc giá trị ngoại lệ tương tự Frequency
+        m_data = pandas_rfm['monetary'].dropna()
+        if not m_data.empty:
+            m_q99 = m_data.quantile(0.99)
+            m_data_clipped = m_data[m_data <= m_q99]
+            
+            fig_m, ax_m = plt.subplots()
+            ax_m.hist(m_data_clipped, bins=30, color='salmon', edgecolor='black')
+            ax_m.set_title(f"Phân bố Monetary (lọc giá trị > {m_q99:,.0f})")
+            ax_m.set_xlabel("Tổng chi tiêu")
+            ax_m.set_ylabel("Số lượng khách hàng")
+            st.pyplot(fig_m)
+        else:
+            st.write("Không có dữ liệu Monetary.")
 
     # Bảng thống kê trung bình
     st.markdown("**Thống kê trung bình RFM**")
@@ -560,6 +657,31 @@ def run_customer_behavior(df):
 # =========================
 # ML: KMeans Customer Segmentation (RFM nhẹ)
 # =========================
+def _interpret_cluster(r, f, m, g_r, g_f, g_m):
+    """Hàm trợ giúp để tự động diễn giải ý nghĩa cụm."""
+    
+    # So sánh R, F, M của cụm với trung bình chung
+    # (Tốt/Xấu/TB)
+    r_score = "Thấp (Tốt)" if r < g_r * 0.9 else "Cao (Xấu)" if r > g_r * 1.1 else "Trung bình"
+    f_score = "Cao (Tốt)" if f > g_f * 1.1 else "Thấp (Xấu)" if f < g_f * 0.9 else "Trung bình"
+    m_score = "Cao (Tốt)" if m > g_m * 1.1 else "Thấp (Xấu)" if m < g_m * 0.9 else "Trung bình"
+
+    # Diễn giải logic
+    if r_score == "Thấp (Tốt)" and f_score == "Cao (Tốt)" and m_score == "Cao (Tốt)":
+        return "🌟 Khách hàng VIP/Trung thành"
+    elif r_score == "Cao (Xấu)" and f_score == "Thấp (Xấu)":
+        return "⚠️ Khách hàng có nguy cơ rời bỏ"
+    elif r_score == "Thấp (Tốt)" and f_score == "Thấp (Xấu)":
+        return "💡 Khách hàng mới"
+    elif f_score == "Cao (Tốt)":
+        return "💖 Khách hàng thân thiết"
+    elif m_score == "Cao (Tốt)":
+        return "💰 Khách hàng chi tiêu cao"
+    elif r_score == "Cao (Xấu)":
+        return "💤 Khách hàng ngủ đông"
+    
+    return "Khách hàng Tiềm năng/Trung bình"
+
 def run_kmeans_segmentation(spark, parquet_path: str):
     from pyspark.ml.feature import VectorAssembler, StandardScaler
     from pyspark.ml.clustering import KMeans
@@ -596,16 +718,31 @@ def run_kmeans_segmentation(spark, parquet_path: str):
                 count("*").alias("frequency"),
                 _sum("total_amount").alias("monetary")))
 
-    max_ts = df_nonull.agg(_max("purchase_ts").alias("mx")).collect()[0]["mx"]
-    if max_ts is None:
-        st.error("Không tính được mốc thời gian lớn nhất.")
+    max_ts_row = df_nonull.agg(_max("purchase_ts").alias("mx")).collect()
+    if not max_ts_row or max_ts_row[0]["mx"] is None:
+        st.error("Không tính được mốc thời gian lớn nhất (max_ts).")
         return
+    max_ts = max_ts_row[0]["mx"]
 
     rfm = rfm.withColumn("recency_days", expr(f"datediff(to_timestamp('{str(max_ts)}'), last_purchase)"))
     rfm_clean = rfm.na.drop(subset=["recency_days", "frequency", "monetary"])
+    
     if rfm_clean.count() == 0:
         st.error("Không đủ dữ liệu sau khi làm sạch để phân cụm.")
         return
+        
+    # Lấy trung bình toàn cục để so sánh
+    try:
+        global_avgs = rfm_clean.agg(
+            avg("recency_days"), avg("frequency"), avg("monetary")
+        ).collect()[0]
+        global_r, global_f, global_m = global_avgs[0], global_avgs[1], global_avgs[2]
+        if global_r is None: global_r = 0
+        if global_f is None: global_f = 0
+        if global_m is None: global_m = 0
+    except Exception:
+        global_r, global_f, global_m = 0, 0, 0
+
 
     # Pipeline tiền xử lý
     features = ["recency_days", "frequency", "monetary"]
@@ -614,7 +751,7 @@ def run_kmeans_segmentation(spark, parquet_path: str):
 
     # ---- TỰ ĐỘNG CHỌN k THEO SILHOUETTE ----
     evaluator = ClusteringEvaluator(featuresCol="features")
-    ks = list(range(2, 9))  # dải k thử (2..8). Có thể tăng nếu muốn.
+    ks = list(range(2, 9))  # dải k thử (2..8)
     scores = []
 
     # (Tăng tốc nhẹ với sample nếu quá lớn)
@@ -622,6 +759,199 @@ def run_kmeans_segmentation(spark, parquet_path: str):
     approx = rfm_clean.count()
     if approx > 200_000:
         train_df = rfm_clean.sample(False, 200_000 / approx, seed=42)
+
+    best_model = None
+    best_k = None
+    best_score = float("-inf")
+
+    st.markdown("#### 1. Chọn số cụm (k) tự động theo Silhouette")
+    progress_bar = st.progress(0, text="Đang tìm k tốt nhất...")
+
+    for i, k in enumerate(ks):
+        model = Pipeline(stages=[assembler, scaler, KMeans(featuresCol="features", k=k, seed=42)]).fit(train_df)
+        pred_k = model.transform(train_df)
+        sil = evaluator.evaluate(pred_k)
+        scores.append((k, sil))
+        if sil > best_score:
+            best_score, best_k, best_model = sil, k, model
+        progress_bar.progress((i + 1) / len(ks), text=f"Đã thử k={k} (Silhouette: {sil:.4f})")
+    
+    progress_bar.empty()
+
+    # **CẢI TIẾN 1: Trực quan hóa chọn k**
+    scores_df = pd.DataFrame(scores, columns=["k", "silhouette"]).set_index("k")
+    st.line_chart(scores_df)
+    st.success(f"Số cụm được chọn: **k = {best_k}** (Silhouette cao nhất = **{best_score:.4f}**)")
+
+    # Dùng model tốt nhất để gán cụm cho TOÀN BỘ dữ liệu rfm_clean
+    res = best_model.transform(rfm_clean)
+
+    # Lấy profile cụm
+    prof_spark = (res.groupBy("prediction")
+              .agg(avg("recency_days").alias("avg_recency"),
+                   avg("frequency").alias("avg_freq"),
+                   avg("monetary").alias("avg_monetary"),
+                   count("*").alias("n_customers"))
+              .orderBy("prediction"))
+    prof_pd = prof_spark.toPandas()
+
+
+    # **CẢI TIẾN 2: Dùng Tab để tổ chức kết quả**
+    st.markdown("---")
+    st.markdown("#### 2. Kết quả phân cụm")
+    
+    tab_profile, tab_viz, tab_data = st.tabs([
+        "📊 Profile Cụm (Họ là ai?)", 
+        "📈 Trực quan hóa Cụm (Họ ở đâu?)", 
+        "📋 Dữ liệu chi tiết"
+    ])
+
+    # **CẢI TIẾN 3: Dùng st.metric và diễn giải cụm**
+    with tab_profile:
+        st.subheader("Phân tích Profile từng cụm")
+        st.write("""
+        Dưới đây là đặc điểm trung bình của khách hàng trong từng cụm. 
+        Tên cụm (ví dụ: "Khách hàng VIP") được tự động gợi ý dựa trên việc so sánh với mức trung bình chung.
+        """)
+        
+        for idx, row in prof_pd.iterrows():
+            cluster_id = row["prediction"]
+            # Đổi tên biến 'count' thành 'n_customers' để tránh xung đột
+            avg_r, avg_f, avg_m, n_customers = row["avg_recency"], row["avg_freq"], row["avg_monetary"], row["n_customers"]
+            
+            # Tự động diễn giải
+            title = _interpret_cluster(avg_r, avg_f, avg_m, global_r, global_f, global_m)
+            
+            st.markdown(f"### Cụm {cluster_id}: {title}")
+            
+            # Dùng st.metric để hiển thị đẹp mắt
+            c1, c2, c3, c4 = st.columns(4)
+            # Sử dụng biến 'n_customers' mới
+            c1.metric("Số lượng KH", f"{n_customers:,.0f} KH")
+            c2.metric("Recency (TB)", f"{avg_r:,.1f} ngày", 
+                      f"{avg_r - global_r:,.1f} vs TB", help=f"Trung bình chung: {global_r:,.1f} ngày")
+            c3.metric("Frequency (TB)", f"{avg_f:,.1f} lần", 
+                      f"{avg_f - global_f:,.1f} vs TB", help=f"Trung bình chung: {global_f:,.1f} lần")
+            c4.metric("Monetary (TB)", f"{avg_m:,.0f}", 
+                      f"{avg_m - global_m:,.0f} vs TB", help=f"Trung bình chung: {global_m:,.0f}")
+            
+            st.divider() # Ngăn cách giữa các cụm
+
+    # **CẢI TIẾN 4: Biểu đồ Scatter Plot R-F-M**
+    with tab_viz:
+        st.subheader("Trực quan hóa các cụm (R-F-M)")
+        st.write("""
+        Biểu đồ này thể hiện vị trí của các khách hàng:
+        - **Trục X (Recency):** Càng về bên trái càng tốt (mới mua gần đây).
+        - **Trục Y (Frequency):** Càng lên cao càng tốt (mua nhiều lần).
+        - **Kích thước (Size):** Càng lớn càng tốt (chi tiêu nhiều).
+        - **Màu sắc (Color):** Cụm được gán.
+        """)
+        
+        # ======================================================
+        # START: SỬA LỖI
+        # ======================================================
+        # Lấy mẫu dữ liệu để vẽ (tránh crash trình duyệt nếu có > 10k điểm)
+        viz_limit = 5000
+        
+        # CHỌN CÁC CỘT CẦN THIẾT TRƯỚC KHI .toPandas()
+        # Điều này sẽ bỏ qua cột timestamp 'last_purchase' và các cột vector
+        res_selected = res.select("recency_days", "frequency", "monetary", "prediction")
+        
+        total_res = res_selected.count() # Count from the selected DF
+        if total_res > viz_limit:
+            fraction = viz_limit / total_res
+            # Now, sample and convert the *selected* DataFrame
+            viz_df = res_selected.sample(False, fraction, seed=42).limit(viz_limit).toPandas() 
+        else:
+            # Convert the *selected* DataFrame
+            viz_df = res_selected.toPandas()
+        # ======================================================
+        # END: SỬA LỖI
+        # ======================================================
+
+        # Chuyển prediction sang string để Streamlit hiểu là
+        # cột phân loại (categorical) cho màu sắc
+        viz_df["prediction"] = viz_df["prediction"].astype(str)
+        
+        if not viz_df.empty:
+            st.scatter_chart(
+                viz_df,
+                x="recency_days",
+                y="frequency",
+                size="monetary",
+                color="prediction",
+                use_container_width=True
+            )
+        else:
+            st.warning("Không có đủ dữ liệu để vẽ biểu đồ scatter.")
+
+
+    # Tab cuối cùng: Dữ liệu thô và xuất file
+    with tab_data:
+        st.subheader("Dữ liệu khách hàng chi tiết (200 mẫu)")
+        # Bảng kết quả từng khách
+        st.dataframe(
+            res.select("customer_id", "recency_days", "frequency", "monetary", "prediction")
+               .orderBy("prediction", "customer_id")
+               .limit(200)
+               .toPandas(),
+            use_container_width=True
+        )
+
+       
+
+# =========================
+# ML: Product Recommender using Clustering
+# =========================
+def build_product_clustering_model(spark, parquet_path: str):
+    from pyspark.ml.feature import VectorAssembler, StandardScaler
+    from pyspark.ml.clustering import KMeans
+    from pyspark.ml.evaluation import ClusteringEvaluator
+    from pyspark.ml import Pipeline
+
+    # Đảm bảo Spark sống & đọc dữ liệu
+    if not _spark_is_alive(spark):
+        spark = ensure_spark(master)
+    app_id = spark.sparkContext.applicationId
+    try:
+        df = load_parquet_cached(app_id, parquet_path)
+    except Exception:
+        df = spark.read.parquet(parquet_path)
+
+    # Kiểm tra cột cần thiết
+    required = ["product_category", "product_price", "quantity", "total_amount", "returns"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        st.error(f"Thiếu cột cho Product Clustering: {missing}")
+        return
+
+    # Tính features cho từng unique product_category (đại diện cho sản phẩm)
+    # Features: avg_price, avg_quantity, total_revenue, avg_returns_rate
+    prod_features = (df.groupBy("product_category")
+                     .agg(
+                         avg("product_price").alias("avg_price"),
+                         avg("quantity").alias("avg_quantity"),
+                         _sum("total_amount").alias("total_revenue"),
+                         avg(col("returns").cast("double")).alias("avg_returns_rate")
+                     ))
+
+    prod_features_clean = prod_features.na.drop()
+    if prod_features_clean.count() == 0:
+        st.error("Không đủ dữ liệu sản phẩm sau khi làm sạch để phân cụm.")
+        return
+
+    # Pipeline tiền xử lý
+    features = ["avg_price", "avg_quantity", "total_revenue", "avg_returns_rate"]
+    assembler = VectorAssembler(inputCols=features, outputCol="features_raw")
+    scaler = StandardScaler(inputCol="features_raw", outputCol="features", withStd=True, withMean=True)
+
+    # Chọn k tự động (2-6 vì số category thường ít)
+    evaluator = ClusteringEvaluator(featuresCol="features")
+    ks = list(range(10,20))
+    scores = []
+
+    train_df = prod_features_clean  # Số lượng ít nên không cần sample
 
     best_model = None
     best_k = None
@@ -635,43 +965,48 @@ def run_kmeans_segmentation(spark, parquet_path: str):
         if sil > best_score:
             best_score, best_k, best_model = sil, k, model
 
-    # Hiển thị bảng Silhouette theo k
-    st.markdown("#### Chọn số cụm tự động theo Silhouette")
+    # Hiển thị Silhouette scores
+    st.markdown("#### Chọn số cụm tự động theo Silhouette (cho sản phẩm)")
     st.dataframe(
         pd.DataFrame(scores, columns=["k", "silhouette"]).sort_values("k"),
         use_container_width=True
     )
-    st.success(f"Số cụm được chọn: **k = {best_k}**  (Silhouette = **{best_score:.4f}**)")
+    st.success(f"Số cụm sản phẩm được chọn: **k = {best_k}** (Silhouette = **{best_score:.4f}**)")
 
-    # Dùng model tốt nhất để gán cụm cho TOÀN BỘ dữ liệu rfm_clean
-    res = best_model.transform(rfm_clean)
+    # Áp dụng model cho toàn bộ
+    clustered_prods = best_model.transform(prod_features_clean)
 
-    # Bảng kết quả từng khách
-    st.dataframe(
-        res.select("customer_id", "recency_days", "frequency", "monetary", "prediction")
-           .orderBy("prediction", "customer_id")
-           .limit(200)
-           .toPandas(),
-        use_container_width=True
-    )
+    # Lưu cluster vào session state để dùng cho UI
+    st.session_state["clustered_prods"] = clustered_prods
+    st.session_state["best_k"] = best_k
+    st.session_state["product_model_built"] = True
 
-    # ---- BẢNG PROFILE CỤM (bạn nói không thấy, mình buộc hiển thị ở đây) ----
-    st.markdown("#### Profile từng cụm (trung bình R/F/M + số lượng)")
-    prof = (res.groupBy("prediction")
-              .agg(avg("recency_days").alias("avg_recency"),
-                   avg("frequency").alias("avg_freq"),
-                   avg("monetary").alias("avg_monetary"),
-                   count("*").alias("n_customers"))
-              .orderBy("prediction"))
-    st.dataframe(prof.toPandas(), use_container_width=True)
+    st.info("Model phân cụm sản phẩm đã được xây dựng. Bây giờ bạn có thể chọn sản phẩm để gợi ý bên dưới.")
 
-    # (Tuỳ chọn) Xuất kết quả
-    with st.expander("Xuất kết quả phân cụm"):
-        out_dir = st.text_input("Đường dẫn xuất (HDFS hoặc file://)", value=f"{parquet_path.rstrip('/')}_kmeans")
-        if st.button("Ghi Parquet"):
-            (res.select("customer_id", "recency_days", "frequency", "monetary", "prediction")
-               .write.mode("overwrite").parquet(out_dir))
-            st.success(f"Đã ghi: {out_dir}")
+    # THÊM: Hiển thị nội dung từng cụm
+    st.markdown("### Nội dung từng cụm sản phẩm")
+    from pyspark.sql.functions import collect_list, size
+
+    # Group by cluster và collect list sản phẩm
+    cluster_contents = (clustered_prods
+                        .groupBy("prediction")
+                        .agg(
+                            collect_list("product_category").alias("products"),
+                            count("*").alias("num_products")
+                        )
+                        .orderBy("prediction"))
+
+    cluster_pdf = cluster_contents.toPandas()
+
+    for idx, row in cluster_pdf.iterrows():
+        cluster_id = row["prediction"]
+        products = row["products"]
+        num = row["num_products"]
+        st.markdown(f"**Cụm {cluster_id}: {num} sản phẩm**")
+        st.write(", ".join(products[:20]))  # Hiển thị tối đa 20 sản phẩm đầu để tránh dài dòng
+        if len(products) > 20:
+            st.write(f"... và {len(products) - 20} sản phẩm khác")
+        st.markdown("---")
 
 # =========================
 # UI
@@ -766,3 +1101,64 @@ if st.button("Phân cụm khách hàng (KMeans)"):
     except Exception as e:
         st.error(f"Lỗi ML (KMeans): {e}")
         st.code(traceback.format_exc())
+
+# Phần gợi ý sản phẩm: Tách build model và UI
+st.markdown("### 🛒 Gợi ý sản phẩm dựa trên Clustering")
+if st.button("Xây dựng model phân cụm sản phẩm"):
+    try:
+        spark = ensure_spark(master, log_level=log_level)
+        build_product_clustering_model(spark, ppath)
+    except Exception as e:
+        st.error(f"Lỗi xây dựng model: {e}")
+        st.code(traceback.format_exc())
+
+# UI chọn và gợi ý: Luôn hiển thị nếu model đã build
+if st.session_state.get("product_model_built", False):
+    st.subheader("🛒 Gợi ý sản phẩm dựa trên Clustering (theo Product Category)")
+
+    # Lấy unique categories từ data (cần đọc data để có list)
+    try:
+        spark_temp = ensure_spark(master, log_level=log_level)
+        df_temp = spark_temp.read.parquet(ppath)
+        unique_cats = [row["product_category"] for row in df_temp.select("product_category").distinct().collect()]
+    except Exception:
+        unique_cats = []
+        st.warning("Không thể tải danh sách sản phẩm. Hãy chạy ETL trước.")
+
+    if unique_cats:
+        selected_category = st.selectbox("Chọn Product Category (sản phẩm đại diện):", unique_cats, key="select_product")
+
+        if st.button("Tìm gợi ý sản phẩm tương tự", key="find_recommend"):
+            # Tìm cluster của sản phẩm được chọn
+            selected_cluster = (st.session_state["clustered_prods"]
+                                .filter(col("product_category") == selected_category)
+                                .select("prediction").collect()[0]["prediction"])
+
+            # Lấy top 5 sản phẩm khác trong cùng cluster (theo total_revenue)
+            recommendations = (st.session_state["clustered_prods"]
+                               .filter(col("prediction") == selected_cluster)
+                               .filter(col("product_category") != selected_category)
+                               .select("product_category", "avg_price", "avg_quantity", "total_revenue", "avg_returns_rate")
+                               .orderBy(F.desc("total_revenue"))
+                               .limit(5))
+
+            if recommendations.count() > 0:
+                rec_pdf = recommendations.toPandas()
+                st.markdown(f"**Gợi ý cho '{selected_category}' (Cụm {selected_cluster})**")
+                st.dataframe(
+                    rec_pdf,
+                    use_container_width=True,
+                    column_config={
+                        "product_category": "Sản phẩm gợi ý",
+                        "avg_price": "Giá TB",
+                        "avg_quantity": "Số lượng TB",
+                        "total_revenue": "Doanh thu tổng",
+                        "avg_returns_rate": "Tỉ lệ trả TB"
+                    }
+                )
+            else:
+                st.warning("Không có sản phẩm tương tự trong cụm này.")
+    else:
+        st.warning("Không có dữ liệu sản phẩm để chọn.")
+else:
+    st.info("Nhấn 'Xây dựng model phân cụm sản phẩm' để bắt đầu.")
