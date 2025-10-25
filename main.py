@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
+# Sửa lỗi: Thêm PCA vào import ở đây
 from pyspark.ml.feature import StringIndexer, VectorAssembler, StandardScaler, PCA
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.evaluation import ClusteringEvaluator
@@ -399,7 +400,6 @@ def run_customer_behavior(df):
 # KMEANS Segmentation Function (Returns results dict)
 # =========================
 def _interpret_cluster(r, f, m, g_r, g_f, g_m):
-    # ... (Keep the helper function as is)
     r_score = "Thấp (Tốt)" if r < g_r * 0.9 else "Cao (Xấu)" if r > g_r * 1.1 else "Trung bình"
     f_score = "Cao (Tốt)" if f > g_f * 1.1 else "Thấp (Xấu)" if f < g_f * 0.9 else "Trung bình"
     m_score = "Cao (Tốt)" if m > g_m * 1.1 else "Thấp (Xấu)" if m < g_m * 0.9 else "Trung bình"
@@ -457,9 +457,7 @@ def run_kmeans_segmentation(spark, parquet_path: str):
         results['best_k'] = best_k
         results['best_score'] = best_score
         
-        if best_model is None: # Handle case where no k was found (e.g., all silhouette scores invalid)
-            st.error("Không thể tìm thấy model tốt nhất.")
-            return None
+        if best_model is None: st.error("Không thể tìm thấy model tốt nhất."); return None
 
         res = best_model.transform(rfm_clean) # Apply best model to full clean data
         
@@ -470,30 +468,15 @@ def run_kmeans_segmentation(spark, parquet_path: str):
         for _, row in prof_pd.iterrows():
             avg_r, avg_f, avg_m, n_cust = row["avg_recency"], row["avg_freq"], row["avg_monetary"], row["n_customers"]
             title = _interpret_cluster(avg_r, avg_f, avg_m, global_r, global_f, global_m)
-            metrics = {
-                "Recency (TB)": (f"{avg_r:,.1f} ngày", f"{avg_r - global_r:,.1f} vs TB"),
-                "Frequency (TB)": (f"{avg_f:,.1f} lần", f"{avg_f - global_f:,.1f} vs TB"),
-                "Monetary (TB)": (f"{avg_m:,.0f}", f"{avg_m - global_m:,.0f} vs TB")
-            }
-            helps = {
-                 "Recency (TB)": f"Trung bình chung: {global_r:,.1f} ngày",
-                 "Frequency (TB)": f"Trung bình chung: {global_f:,.1f} lần",
-                 "Monetary (TB)": f"Trung bình chung: {global_m:,.0f}"
-            }
-            cluster_profiles_list.append({
-                "cluster_id": row["prediction"], "title": title, "n_customers": f"{n_cust:,.0f} KH",
-                "metrics": metrics, "helps": helps
-            })
+            metrics = { "Recency (TB)": (f"{avg_r:,.1f} ngày", f"{avg_r - global_r:,.1f} vs TB"), "Frequency (TB)": (f"{avg_f:,.1f} lần", f"{avg_f - global_f:,.1f} vs TB"), "Monetary (TB)": (f"{avg_m:,.0f}", f"{avg_m - global_m:,.0f} vs TB") }
+            helps = { "Recency (TB)": f"Trung bình chung: {global_r:,.1f} ngày", "Frequency (TB)": f"Trung bình chung: {global_f:,.1f} lần", "Monetary (TB)": f"Trung bình chung: {global_m:,.0f}" }
+            cluster_profiles_list.append({ "cluster_id": row["prediction"], "title": title, "n_customers": f"{n_cust:,.0f} KH", "metrics": metrics, "helps": helps })
         results['cluster_profiles'] = cluster_profiles_list
 
         res_selected = res.select("recency_days", "frequency", "monetary", "prediction")
-        viz_limit = 5000
-        total_res = res_selected.count()
-        if total_res > viz_limit:
-            fraction = viz_limit / total_res
-            viz_df = res_selected.sample(False, fraction, seed=42).limit(viz_limit).toPandas()
-        else:
-            viz_df = res_selected.toPandas()
+        viz_limit = 5000; total_res = res_selected.count()
+        if total_res > viz_limit: viz_df = res_selected.sample(False, viz_limit / total_res, seed=42).limit(viz_limit).toPandas()
+        else: viz_df = res_selected.toPandas()
         viz_df["prediction"] = viz_df["prediction"].astype(str)
         results['scatter_chart_data'] = viz_df
 
@@ -503,9 +486,7 @@ def run_kmeans_segmentation(spark, parquet_path: str):
         return results
 
     except Exception as e:
-        st.error(f"Lỗi ML (KMeans): {e}")
-        st.code(traceback.format_exc())
-        return None
+        st.error(f"Lỗi ML (KMeans): {e}"); st.code(traceback.format_exc()); return None
 
 # =========================
 # Product Clustering Function (Returns results dict)
@@ -543,7 +524,7 @@ def build_product_clustering_model(spark, parquet_path: str, k_value: int = 0):
                 try: best_score = ClusteringEvaluator(featuresCol="features").evaluate(best_model.transform(train_df))
                 except Exception: best_score = -999; st.warning("Không thể tính Silhouette.")
             else: best_score = -999
-            results['k_selection_prod_chart_data'] = None # No chart for manual k
+            results['k_selection_prod_chart_data'] = None
         else:
             evaluator = ClusteringEvaluator(featuresCol="features")
             max_k = min(count_prod_features, 11) if count_prod_features > 1 else 2
@@ -567,27 +548,23 @@ def build_product_clustering_model(spark, parquet_path: str, k_value: int = 0):
                     scores.sort(key=lambda item: item[1], reverse=True)
                     best_k = scores[0][0]; best_score = scores[0][1]
                     st.warning(f"Silhouette không dương. Chọn k={best_k} ({best_score:.4f}).")
-                    kmeans = KMeans(featuresCol="features", k=best_k, seed=42) # Retrain
-                    best_model = Pipeline(stages=[assembler, scaler, kmeans]).fit(train_df)
+                    kmeans = KMeans(featuresCol="features", k=best_k, seed=42); best_model = Pipeline(stages=[assembler, scaler, kmeans]).fit(train_df)
                 else: st.error("Không thể xác định số cụm."); return None
             
             results['k_selection_prod_chart_data'] = pd.DataFrame(scores, columns=["k", "silhouette"]).set_index("k") if scores else None
 
         results['best_k_prod'] = best_k
         results['best_score_prod'] = best_score
-        
         if best_model is None: st.error("Không thể tạo model phân cụm sản phẩm."); return None
 
         clustered_prods = best_model.transform(prod_features_clean)
         
-        pca = PCA(k=2, inputCol="features", outputCol="pca_features")
-        pca_success = False
+        pca = PCA(k=2, inputCol="features", outputCol="pca_features"); pca_success = False
         try:
             pca_model = pca.fit(clustered_prods)
             clustered_prods_with_pca = pca_model.transform(clustered_prods)
             pca_success = True
             
-            # Prepare PCA plot data and figure
             pca_data_pd = clustered_prods_with_pca.select("product_category", "pca_features", "prediction").toPandas()
             if not pca_data_pd.empty:
                 pca_data_pd['x'] = pca_data_pd['pca_features'].apply(lambda v: v[0] if v and len(v)>0 else None)
@@ -615,9 +592,7 @@ def build_product_clustering_model(spark, parquet_path: str, k_value: int = 0):
             else: results['pca_plot_fig'] = None; results['pca_variance_info'] = "Không có dữ liệu PCA."
             
         except Exception as e:
-            st.warning(f"Không thể thực hiện/vẽ PCA: {e}")
-            results['pca_plot_fig'] = None
-            results['pca_variance_info'] = "PCA thất bại."
+            st.warning(f"Không thể thực hiện/vẽ PCA: {e}"); results['pca_plot_fig'] = None; results['pca_variance_info'] = "PCA thất bại."
             clustered_prods_with_pca = clustered_prods # Use non-PCA df if PCA fails
 
         results['clustered_prods_spark_df_ref'] = clustered_prods_with_pca # Store ref with PCA if successful
@@ -630,9 +605,7 @@ def build_product_clustering_model(spark, parquet_path: str, k_value: int = 0):
         return results
 
     except Exception as e:
-        st.error(f"Lỗi xây dựng model sản phẩm: {e}")
-        st.code(traceback.format_exc())
-        return None
+        st.error(f"Lỗi xây dựng model sản phẩm: {e}"); st.code(traceback.format_exc()); return None
 
 # =========================
 # UI Layout
@@ -640,16 +613,44 @@ def build_product_clustering_model(spark, parquet_path: str, k_value: int = 0):
 st.set_page_config(page_title="E-commerce Big Data App", layout="wide")
 st.title("🛒 E-commerce Big Data App — Spark ETL • Analytics • ML")
 
-# Initialize session state keys if they don't exist
+# --- Initialize session state keys and Check ETL Status ---
+if 'spark' not in st.session_state: st.session_state['spark'] = None # Initialize spark key
 if 'active_section' not in st.session_state: st.session_state['active_section'] = None
-if 'etl_success' not in st.session_state: st.session_state['etl_success'] = False
 if 'parquet_path' not in st.session_state: st.session_state['parquet_path'] = PARQUET_DIR
 if 'analytics_results' not in st.session_state: st.session_state['analytics_results'] = None
 if 'trends_results' not in st.session_state: st.session_state['trends_results'] = None
 if 'behavior_results' not in st.session_state: st.session_state['behavior_results'] = None
 if 'segmentation_results' not in st.session_state: st.session_state['segmentation_results'] = None
 if 'product_clustering_results' not in st.session_state: st.session_state['product_clustering_results'] = None
-if 'product_model_built' not in st.session_state: st.session_state['product_model_built'] = False # For recommendation UI trigger
+if 'product_model_built' not in st.session_state: st.session_state['product_model_built'] = False
+if 'clustered_prods_df_for_rec' not in st.session_state: st.session_state['clustered_prods_df_for_rec'] = None
+
+# Function to check HDFS path existence
+def check_hdfs_path_exists(spark_session, hdfs_path):
+    if not _spark_is_alive(spark_session) or not hdfs_path.startswith("hdfs://"):
+        return False
+    try:
+        # Check if the path exists AND if it's non-empty (basic check for successful ETL)
+        # This might be slow for very large partitioned directories, but more robust
+        # An alternative is just checking fs.exists(path) which is faster
+        df_check = spark_session.read.parquet(hdfs_path)
+        return not df_check.isEmpty()
+        # fs = spark_session._jvm.org.apache.hadoop.fs.FileSystem.get(spark_session._jsc.hadoopConfiguration())
+        # path = spark_session._jvm.org.apache.hadoop.fs.Path(hdfs_path)
+        # return fs.exists(path)
+    except Exception as e:
+        # If read fails (e.g., path not found, not a dir, permission denied), consider ETL not done
+        print(f"[INFO] Kiểm tra HDFS path '{hdfs_path}' thất bại hoặc thư mục rỗng: {e}")
+        return False
+
+# Check ETL status if it's currently False and Spark is alive
+if not st.session_state.get('etl_success', False): # Only check if currently False
+    spark_session = st.session_state.get("spark")
+    if _spark_is_alive(spark_session):
+        parquet_path_to_check = st.session_state.get("parquet_path", PARQUET_DIR)
+        # Update state based on check result
+        st.session_state['etl_success'] = check_hdfs_path_exists(spark_session, parquet_path_to_check)
+
 
 # Sidebar
 with st.sidebar:
@@ -657,7 +658,12 @@ with st.sidebar:
     master = st.text_input("Spark master", value=DEFAULT_SPARK_MASTER)
     log_level = st.selectbox("Spark log level", ["ERROR","WARN","INFO","DEBUG"], index=1)
     input_path = st.text_input("CSV HDFS path", value=DEFAULT_INPUT)
-    parquet_out = st.text_input("Parquet output", value=st.session_state.get("parquet_path", PARQUET_DIR))
+    parquet_out_default = st.session_state.get("parquet_path", PARQUET_DIR)
+    parquet_out = st.text_input("Parquet output", value=parquet_out_default)
+    if parquet_out != parquet_out_default:
+        st.session_state["parquet_path"] = parquet_out
+        st.session_state["etl_success"] = False # Assume ETL needs rerun
+
     ts_format = st.text_input("Định dạng thời gian (Purchase Date)", value="M/d/yyyy H:mm")
 
     col1, col2 = st.columns(2)
@@ -667,9 +673,9 @@ with st.sidebar:
                 try:
                     st.session_state["spark"] = start_spark(master=master, log_level=log_level)
                     st.success("✅ SparkSession đã sẵn sàng.")
-                except Exception as e:
-                    st.error(f"❌ Khởi tạo thất bại: {e}")
-                    # st.code(traceback.format_exc()) # Maybe too verbose for sidebar
+                    # Trigger rerun to update ETL status check immediately
+                    st.rerun()
+                except Exception as e: st.error(f"❌ Khởi tạo thất bại: {e}")
     with col2:
          if st.button("🔄 Restart Spark"):
             with st.spinner("Đang khởi động lại Spark..."):
@@ -678,16 +684,22 @@ with st.sidebar:
                     if old is not None:
                         try: old.stop()
                         except Exception: pass
+                    
                     _hard_reset_spark_jvm()
                     try: st.cache_resource.clear()
-                    except Exception: pass
+                    except Exception: pass # Ignore if cache clear fails
+
                     st.session_state["spark"] = start_spark(master=master, log_level=log_level)
                     st.success("✅ Đã restart Spark.")
-                    # Clear potentially stale results? Optional.
-                    # st.session_state['active_section'] = None 
-                    # ... clear other results ...
-                except Exception as e:
-                    st.error(f"❌ Restart thất bại: {e}")
+                    # Clear states
+                    st.session_state['active_section'] = None; st.session_state['etl_success'] = False
+                    st.session_state['analytics_results'] = None; st.session_state['trends_results'] = None
+                    st.session_state['behavior_results'] = None; st.session_state['segmentation_results'] = None
+                    st.session_state['product_clustering_results'] = None; st.session_state['product_model_built'] = False
+                    st.session_state['clustered_prods_df_for_rec'] = None
+                    # Trigger rerun to update ETL status check immediately
+                    st.rerun()
+                except Exception as e: st.error(f"❌ Restart thất bại: {e}")
 
     st.divider()
     st.header("📊 Chạy Phân tích")
@@ -696,24 +708,23 @@ with st.sidebar:
         spark = ensure_spark(master, log_level=log_level)
         if spark:
             with st.spinner("Đang chạy ETL..."):
-                etl_output_path = run_etl(spark, src_path=input_path, dst_parquet=parquet_out, ts_format=ts_format.strip())
-                if etl_output_path:
-                    st.session_state['parquet_path'] = etl_output_path
-                    st.session_state['etl_success'] = True
-                    # Clear old results if ETL is rerun
-                    st.session_state['analytics_results'] = None
-                    st.session_state['trends_results'] = None
-                    st.session_state['behavior_results'] = None
-                    st.session_state['segmentation_results'] = None
-                    st.session_state['product_clustering_results'] = None
-                    st.session_state['product_model_built'] = False
-                    st.session_state['active_section'] = None # Reset view after ETL
-                else:
-                    st.session_state['etl_success'] = False
-        else:
-            st.warning("⚠️ Spark chưa sẵn sàng.")
+                try:
+                    current_parquet_path = st.session_state.get("parquet_path", PARQUET_DIR)
+                    etl_output_path = run_etl(spark, src_path=input_path, dst_parquet=current_parquet_path, ts_format=ts_format.strip())
+                    if etl_output_path:
+                        st.session_state['parquet_path'] = etl_output_path
+                        st.session_state['etl_success'] = True
+                        st.session_state['analytics_results'] = None; st.session_state['trends_results'] = None
+                        st.session_state['behavior_results'] = None; st.session_state['segmentation_results'] = None
+                        st.session_state['product_clustering_results'] = None; st.session_state['product_model_built'] = False
+                        st.session_state['clustered_prods_df_for_rec'] = None
+                        st.session_state['active_section'] = None
+                        st.rerun() # Rerun to remove initial warning if present
+                    else: st.session_state['etl_success'] = False
+                except Exception: st.session_state['etl_success'] = False
+        else: st.warning("⚠️ Spark chưa sẵn sàng.")
 
-    # Update parquet path input based on state
+    # Update parquet path input based on state AFTER potential ETL run
     ppath_input = st.session_state.get("parquet_path", PARQUET_DIR)
 
     # Analytics Button
@@ -722,14 +733,11 @@ with st.sidebar:
         if spark and st.session_state.get('etl_success', False):
              with st.spinner("Đang chạy Analytics..."):
                 results = run_analytics(spark, ppath_input)
-                if results:
-                    st.session_state['analytics_results'] = results
-                    st.session_state['active_section'] = 'analytics'
-        elif not st.session_state.get('etl_success', False):
-             st.warning("⚠️ Vui lòng chạy ETL thành công trước.")
+                if results: st.session_state['analytics_results'] = results; st.session_state['active_section'] = 'analytics'
+        elif not st.session_state.get('etl_success', False): st.warning("⚠️ Vui lòng chạy ETL thành công trước hoặc kiểm tra đường dẫn Parquet.")
         else: st.warning("⚠️ Spark chưa sẵn sàng.")
 
-    # Advanced Analysis Buttons in Expander
+    # Advanced Analysis Buttons
     with st.expander("📈 Phân tích Nâng cao"):
         if st.button("📊 Phân tích Xu hướng"):
             spark = ensure_spark(master, log_level=log_level)
@@ -737,11 +745,8 @@ with st.sidebar:
                 with st.spinner("Đang phân tích xu hướng..."):
                     df = load_parquet_cached(spark.sparkContext.applicationId, ppath_input)
                     results = run_trend_analysis(df)
-                    if results:
-                        st.session_state['trends_results'] = results
-                        st.session_state['active_section'] = 'trends'
-            elif not st.session_state.get('etl_success', False):
-                st.warning("⚠️ Vui lòng chạy ETL thành công trước.")
+                    if results: st.session_state['trends_results'] = results; st.session_state['active_section'] = 'trends'
+            elif not st.session_state.get('etl_success', False): st.warning("⚠️ Vui lòng chạy ETL thành công trước hoặc kiểm tra đường dẫn Parquet.")
             else: st.warning("⚠️ Spark chưa sẵn sàng.")
 
         if st.button("🧠 Phân tích Hành vi (RFM)"):
@@ -750,25 +755,19 @@ with st.sidebar:
                  with st.spinner("Đang phân tích hành vi..."):
                     df = load_parquet_cached(spark.sparkContext.applicationId, ppath_input)
                     results = run_customer_behavior(df)
-                    if results:
-                        st.session_state['behavior_results'] = results
-                        st.session_state['active_section'] = 'behavior'
-            elif not st.session_state.get('etl_success', False):
-                 st.warning("⚠️ Vui lòng chạy ETL thành công trước.")
+                    if results: st.session_state['behavior_results'] = results; st.session_state['active_section'] = 'behavior'
+            elif not st.session_state.get('etl_success', False): st.warning("⚠️ Vui lòng chạy ETL thành công trước hoặc kiểm tra đường dẫn Parquet.")
             else: st.warning("⚠️ Spark chưa sẵn sàng.")
 
-    # Machine Learning Buttons in Expander
+    # Machine Learning Buttons
     with st.expander("🤖 Machine Learning"):
         if st.button("👥 Phân cụm Khách hàng (KMeans)"):
             spark = ensure_spark(master, log_level=log_level)
             if spark and st.session_state.get('etl_success', False):
                 with st.spinner("Đang phân cụm khách hàng..."):
                     results = run_kmeans_segmentation(spark, ppath_input)
-                    if results:
-                        st.session_state['segmentation_results'] = results
-                        st.session_state['active_section'] = 'segmentation'
-            elif not st.session_state.get('etl_success', False):
-                 st.warning("⚠️ Vui lòng chạy ETL thành công trước.")
+                    if results: st.session_state['segmentation_results'] = results; st.session_state['active_section'] = 'segmentation'
+            elif not st.session_state.get('etl_success', False): st.warning("⚠️ Vui lòng chạy ETL thành công trước hoặc kiểm tra đường dẫn Parquet.")
             else: st.warning("⚠️ Spark chưa sẵn sàng.")
 
         st.markdown("---")
@@ -781,15 +780,11 @@ with st.sidebar:
                     results = build_product_clustering_model(spark, ppath_input, k_value=k_input_prod)
                     if results:
                         st.session_state['product_clustering_results'] = results
-                        # Store necessary part for recommendation UI
-                        st.session_state['clustered_prods_df_for_rec'] = results.get('clustered_prods_spark_df_ref')
+                        st.session_state['clustered_prods_df_for_rec'] = results.get('clustered_prods_spark_df_ref') # Store the DF reference
                         st.session_state['product_model_built'] = True
                         st.session_state['active_section'] = 'product_clustering'
-                    else: # Handle build failure
-                        st.session_state['product_model_built'] = False
-
-            elif not st.session_state.get('etl_success', False):
-                 st.warning("⚠️ Vui lòng chạy ETL thành công trước.")
+                    else: st.session_state['product_model_built'] = False; st.session_state['clustered_prods_df_for_rec'] = None
+            elif not st.session_state.get('etl_success', False): st.warning("⚠️ Vui lòng chạy ETL thành công trước hoặc kiểm tra đường dẫn Parquet.")
             else: st.warning("⚠️ Spark chưa sẵn sàng.")
 
 
@@ -798,48 +793,37 @@ with st.sidebar:
 # =========================
 active_section = st.session_state.get('active_section')
 
+# --- Display Area for Analytics ---
 if active_section == 'analytics':
     st.header("📊 Kết quả Analytics Tổng quan")
     results = st.session_state.get('analytics_results')
     if results:
         st.write(f"**Số dòng:** {results.get('row_count', 'N/A'):,} | **Số cột:** {results.get('col_count', 'N/A')}")
         with st.expander("Danh sách cột"): st.code(", ".join(results.get('column_list',[])))
-        
         st.markdown("### KPIs tổng quan")
         kpi_data = results.get('kpi_data', {})
         if kpi_data:
             cols_kpi = st.columns(len(kpi_data))
             for i, (k, v) in enumerate(kpi_data.items()):
-                 # Format currency and percentages nicely
-                 if "thu" in k.lower() or "amount" in k.lower():
-                     val_str = f"{v:,.0f}" if v is not None else "N/A"
-                 elif "%" in k:
-                     val_str = f"{v:.2f}%" if v is not None else "N/A"
-                 else:
-                     val_str = f"{v:,}" if v is not None else "N/A"
+                 if "thu" in k.lower() or "amount" in k.lower(): val_str = f"{v:,.0f}" if v is not None else "N/A"
+                 elif "%" in k: val_str = f"{v:.2f}%" if v is not None else "N/A"
+                 else: val_str = f"{v:,}" if v is not None else "N/A"
                  cols_kpi[i].metric(label=k, value=val_str)
         else: st.write("Không đủ dữ liệu tính KPI.")
-
         st.markdown("### Doanh thu & Đơn hàng theo ngày")
-        if 'daily_revenue_chart_data' in results and results['daily_revenue_chart_data'] is not None:
-             st.markdown("#### Xu hướng doanh thu (Revenue & MA-7)")
-             st.line_chart(results['daily_revenue_chart_data'])
+        if 'daily_revenue_chart_data' in results and results['daily_revenue_chart_data'] is not None: st.markdown("#### Xu hướng doanh thu (Revenue & MA-7)"); st.line_chart(results['daily_revenue_chart_data'])
         else: st.warning("Không có dữ liệu doanh thu theo ngày.")
-        if 'daily_orders_chart_data' in results and results['daily_orders_chart_data'] is not None:
-             st.markdown("#### Số lượng đơn hàng hàng ngày")
-             st.bar_chart(results['daily_orders_chart_data'])
+        if 'daily_orders_chart_data' in results and results['daily_orders_chart_data'] is not None: st.markdown("#### Số lượng đơn hàng hàng ngày"); st.bar_chart(results['daily_orders_chart_data'])
         else: st.warning("Không có dữ liệu đơn hàng theo ngày.")
-
         st.markdown("### Top Category")
         if 'top_cat_data' in results and results['top_cat_data'] is not None:
              st.dataframe(results['top_cat_data'], use_container_width=True)
              col_tc1, col_tc2 = st.columns(2)
-             with col_tc1: 
+             with col_tc1:
                   if results.get('top_cat_cnt_fig'): st.pyplot(results['top_cat_cnt_fig'])
              with col_tc2:
                   if results.get('top_cat_rev_fig'): st.pyplot(results['top_cat_rev_fig'])
         else: st.warning("Không có dữ liệu Top Category.")
-        
         st.markdown("### Phân bố phương thức thanh toán")
         if 'payment_method_data' in results and results['payment_method_data'] is not None:
              st.dataframe(results['payment_method_data'], use_container_width=True)
@@ -849,80 +833,61 @@ if active_section == 'analytics':
              with col_pm2:
                    if results.get('payment_method_rev_fig'): st.pyplot(results['payment_method_rev_fig'])
         else: st.warning("Không có dữ liệu phương thức thanh toán.")
-
         col_r1, col_r2 = st.columns(2)
         with col_r1:
              st.markdown("### Tỉ lệ trả hàng theo ngày")
-             if 'return_rate_chart_data' in results and results['return_rate_chart_data'] is not None:
-                  st.line_chart(results['return_rate_chart_data'])
+             if 'return_rate_chart_data' in results and results['return_rate_chart_data'] is not None: st.line_chart(results['return_rate_chart_data'])
              else: st.warning("Không có dữ liệu tỉ lệ trả hàng.")
         with col_r2:
              st.markdown("### Tỉ lệ churn theo giới tính")
-             if 'churn_gender_fig' in results and results.get('churn_gender_fig'):
-                  st.pyplot(results['churn_gender_fig'])
+             if 'churn_gender_fig' in results and results.get('churn_gender_fig'): st.pyplot(results['churn_gender_fig'])
              else: st.warning("Không có dữ liệu churn theo giới tính.")
-
         st.markdown("### Phân bố độ tuổi khách hàng")
         if 'age_dist_chart_data' in results and results['age_dist_chart_data'] is not None:
-             st.write(f"Biểu đồ cột thể hiện tần suất theo nhóm tuổi (chia {results.get('age_dist_bins_count','N/A')} nhóm).")
-             st.bar_chart(results['age_dist_chart_data'])
+             st.write(f"Biểu đồ cột thể hiện tần suất theo nhóm tuổi (chia {results.get('age_dist_bins_count','N/A')} nhóm)."); st.bar_chart(results['age_dist_chart_data'])
         else: st.warning("Không có dữ liệu phân bố tuổi.")
-        
-    else:
-        st.info("Nhấn nút 'Chạy Analytics Tổng quan' ở thanh bên để xem kết quả.")
+    else: st.info("Chưa có kết quả Analytics. Vui lòng chạy từ thanh bên.")
 
+# --- Display Area for Trends ---
 elif active_section == 'trends':
     st.header("📈 Kết quả Phân tích Xu hướng")
     results = st.session_state.get('trends_results')
     if results:
-        if 'monthly_rev_fig' in results and results.get('monthly_rev_fig'):
-             st.markdown("**Doanh thu theo tháng**"); st.pyplot(results['monthly_rev_fig'])
+        if 'monthly_rev_fig' in results and results.get('monthly_rev_fig'): st.markdown("**Doanh thu theo tháng**"); st.pyplot(results['monthly_rev_fig'])
         else: st.warning("Không có dữ liệu doanh thu theo tháng.")
-        
-        if 'top_5_cat_chart_data' in results and results['top_5_cat_chart_data'] is not None:
-             st.markdown("**Top 5 danh mục SP (Doanh thu)**"); st.bar_chart(results['top_5_cat_chart_data'])
+        if 'top_5_cat_chart_data' in results and results['top_5_cat_chart_data'] is not None: st.markdown("**Top 5 danh mục SP (Doanh thu)**"); st.bar_chart(results['top_5_cat_chart_data'])
         else: st.warning("Không có dữ liệu top 5 category.")
-
-        if 'payment_method_trend_fig' in results and results.get('payment_method_trend_fig'):
-             st.markdown("**Phân bố phương thức thanh toán (Số đơn)**"); st.pyplot(results['payment_method_trend_fig'])
+        if 'payment_method_trend_fig' in results and results.get('payment_method_trend_fig'): st.markdown("**Phân bố phương thức thanh toán (Số đơn)**"); st.pyplot(results['payment_method_trend_fig'])
         else: st.warning("Không có dữ liệu phương thức thanh toán.")
-    else:
-        st.info("Nhấn nút 'Phân tích Xu hướng' ở thanh bên để xem kết quả.")
+    else: st.info("Chưa có kết quả Phân tích Xu hướng. Vui lòng chạy từ thanh bên.")
 
+# --- Display Area for Behavior ---
 elif active_section == 'behavior':
     st.header("🧠 Kết quả Phân tích Hành vi (RFM)")
     results = st.session_state.get('behavior_results')
     if results:
-        if results.get('rfm_scatter_fig'):
-             st.markdown("**Phân bố RFM tổng quan**"); st.pyplot(results['rfm_scatter_fig'])
-        
+        if results.get('rfm_scatter_fig'): st.markdown("**Phân bố RFM tổng quan**"); st.pyplot(results['rfm_scatter_fig'])
         st.markdown("**Phân bố chi tiết R, F, M**")
         col_b1, col_b2, col_b3 = st.columns(3)
-        with col_b1: 
+        with col_b1:
              if results.get('rfm_dist_r_fig'): st.pyplot(results['rfm_dist_r_fig'])
         with col_b2:
              if results.get('rfm_dist_f_fig'): st.pyplot(results['rfm_dist_f_fig'])
         with col_b3:
              if results.get('rfm_dist_m_fig'): st.pyplot(results['rfm_dist_m_fig'])
-             
-        if results.get('rfm_stats_data') is not None:
-             st.markdown("**Thống kê RFM**"); st.dataframe(results['rfm_stats_data'])
-    else:
-        st.info("Nhấn nút 'Phân tích Hành vi (RFM)' ở thanh bên để xem kết quả.")
+        if results.get('rfm_stats_data') is not None: st.markdown("**Thống kê RFM**"); st.dataframe(results['rfm_stats_data'])
+    else: st.info("Chưa có kết quả Phân tích Hành vi. Vui lòng chạy từ thanh bên.")
 
+# --- Display Area for Segmentation ---
 elif active_section == 'segmentation':
     st.header("👥 Kết quả Phân cụm Khách hàng")
     results = st.session_state.get('segmentation_results')
     if results:
         st.markdown("#### 1. Chọn số cụm (k)")
-        if results.get('k_selection_chart_data') is not None:
-             st.line_chart(results['k_selection_chart_data'])
+        if results.get('k_selection_chart_data') is not None: st.line_chart(results['k_selection_chart_data'])
         st.success(f"Số cụm được chọn: **k = {results.get('best_k', 'N/A')}** (Silhouette = **{results.get('best_score', -999):.4f}**)")
-        
-        st.markdown("---")
-        st.markdown("#### 2. Kết quả phân cụm")
+        st.markdown("---"); st.markdown("#### 2. Kết quả phân cụm")
         tab_profile, tab_viz, tab_data = st.tabs(["📊 Profile Cụm", "📈 Trực quan hóa Cụm", "📋 Dữ liệu chi tiết"])
-        
         with tab_profile:
              st.subheader("Profile từng cụm")
              cluster_profiles = results.get('cluster_profiles', [])
@@ -932,99 +897,115 @@ elif active_section == 'segmentation':
                      cols = st.columns(len(profile['metrics']) + 1)
                      cols[0].metric("Số lượng KH", profile['n_customers'])
                      i = 1
-                     for metric_name, (value, delta) in profile['metrics'].items():
-                         cols[i].metric(metric_name, value, delta, help=profile['helps'].get(metric_name))
-                         i += 1
+                     for metric_name, (value, delta) in profile['metrics'].items(): cols[i].metric(metric_name, value, delta, help=profile['helps'].get(metric_name)); i += 1
                      st.divider()
              else: st.warning("Không có dữ liệu profile cụm.")
-        
         with tab_viz:
              st.subheader("Trực quan hóa các cụm (R-F-M)")
              scatter_data = results.get('scatter_chart_data')
-             if scatter_data is not None and not scatter_data.empty:
-                  st.scatter_chart(scatter_data, x="recency_days", y="frequency", size="monetary", color="prediction", use_container_width=True)
+             if scatter_data is not None and not scatter_data.empty: st.scatter_chart(scatter_data, x="recency_days", y="frequency", size="monetary", color="prediction", use_container_width=True)
              else: st.warning("Không có dữ liệu để vẽ biểu đồ scatter.")
-             
         with tab_data:
              st.subheader("Dữ liệu chi tiết (200 mẫu)")
-             if results.get('detailed_data_sample') is not None:
-                  st.dataframe(results['detailed_data_sample'], use_container_width=True)
-             
-             
-    else:
-        st.info("Nhấn nút 'Phân cụm Khách hàng (KMeans)' ở thanh bên để xem kết quả.")
+             if results.get('detailed_data_sample') is not None: st.dataframe(results['detailed_data_sample'], use_container_width=True)
+             with st.expander("Xuất toàn bộ kết quả"):
+                 spark = st.session_state.get("spark"); full_res_df = results.get('full_results_spark_df_ref')
+                 out_dir = st.text_input("Đường dẫn xuất HDFS/File", value=f"{ppath_input.rstrip('/')}_kmeans_export", key="export_seg_path")
+                 if st.button("Ghi Parquet (Phân cụm KH)", key="export_seg_btn"):
+                     if _spark_is_alive(spark) and full_res_df is not None:
+                         with st.spinner("Đang ghi kết quả..."):
+                             try:
+                                 (full_res_df.select("customer_id", "recency_days", "frequency", "monetary", "prediction").write.mode("overwrite").parquet(out_dir))
+                                 st.success(f"Đã ghi: {out_dir}")
+                             except Exception as e: st.error(f"Lỗi khi ghi Parquet: {e}")
+                     elif full_res_df is None: st.error("Không tìm thấy dữ liệu kết quả đầy đủ.")
+                     else: st.warning("⚠️ Spark chưa sẵn sàng.")
+    else: st.info("Chưa có kết quả Phân cụm Khách hàng. Vui lòng chạy từ thanh bên.")
 
+# --- Display Area for Product Clustering ---
 elif active_section == 'product_clustering':
     st.header("🛠️ Kết quả Xây dựng Model Cụm Sản phẩm")
     results = st.session_state.get('product_clustering_results')
     if results:
         k_chart_data = results.get('k_selection_prod_chart_data')
-        if k_chart_data is not None: # Only show if auto-k was run
-             st.markdown("#### Chọn số cụm (k) tự động theo Silhouette")
-             st.line_chart(k_chart_data)
+        if k_chart_data is not None: st.markdown("#### Chọn số cụm (k) tự động theo Silhouette"); st.line_chart(k_chart_data)
         st.success(f"Số cụm sản phẩm được sử dụng: **k = {results.get('best_k_prod', 'N/A')}** (Silhouette = **{results.get('best_score_prod', -999):.4f}**)")
-        
         st.markdown("### Nội dung từng cụm sản phẩm")
         cluster_contents = results.get('cluster_contents_prod', [])
         if cluster_contents:
             for content in cluster_contents:
-                with st.expander(f"Cụm {content['cluster_id']}: {content['num_products']} sản phẩm"):
-                     st.write(", ".join(content['products']))
+                with st.expander(f"Cụm {content['cluster_id']}: {content['num_products']} sản phẩm"): st.write(", ".join(content['products']))
         else: st.warning("Không có dữ liệu nội dung cụm.")
-        
         st.markdown("### Trực quan hóa các cụm sản phẩm (PCA 2D)")
         pca_fig = results.get('pca_plot_fig')
-        if pca_fig:
-            st.pyplot(pca_fig)
-            st.write(results.get('pca_variance_info', ''))
-        else:
-            st.warning("Không thể vẽ biểu đồ PCA (có thể do lỗi hoặc dữ liệu quá ít).")
-            st.write(results.get('pca_variance_info', '')) # Show reason if available
-    else:
-        st.info("Nhấn nút 'Xây dựng Model Cụm SP' ở thanh bên để xem kết quả.")
+        if pca_fig: st.pyplot(pca_fig); st.write(results.get('pca_variance_info', ''))
+        else: st.warning("Không thể vẽ biểu đồ PCA."); st.write(results.get('pca_variance_info', ''))
+    else: st.info("Chưa có kết quả Model Cụm Sản phẩm. Vui lòng chạy từ thanh bên.")
 
+# --- Default Welcome Message ---
 else:
-    # Default view when no section is active
     st.info("⬅️ Chào mừng! Vui lòng chọn một hành động từ thanh bên để bắt đầu.")
+    # Show ETL warning only if the check determined it's needed
     if not st.session_state.get('etl_success', False):
-         st.warning("⚠️ Bước đầu tiên là chạy ETL.")
+         st.warning("⚠️ Bước đầu tiên là chạy ETL, hoặc đảm bảo đường dẫn Parquet output đúng và Spark đã khởi tạo.")
 
-# Recommendation UI (Needs product model results in session state)
+# --- Recommendation UI ---
 if st.session_state.get("product_model_built", False):
-    st.header("💡 Gợi ý Sản phẩm Tương tự")
-    
+    st.divider()
+    st.header("💡 Gợi ý Sản phẩm")
     clustered_prods_df = st.session_state.get('clustered_prods_df_for_rec')
-    if clustered_prods_df is None:
-        st.warning("⚠️ Không tìm thấy dữ liệu model sản phẩm. Vui lòng chạy lại bước 'Xây dựng Model Cụm SP'.")
+    spark_session_rec = st.session_state.get("spark") # Get current spark session for checks
+
+    if clustered_prods_df is None or not _spark_is_alive(spark_session_rec):
+        st.warning("⚠️ Không tìm thấy dữ liệu model sản phẩm hoặc Spark không hoạt động. Vui lòng chạy lại bước 'Xây dựng Model Cụm SP'.")
     else:
         try:
-            # Lấy unique categories từ DataFrame đã lưu
-            unique_cats = [row["product_category"] for row in clustered_prods_df.select("product_category").distinct().collect()]
+            unique_cats = sorted([row["product_category"] for row in clustered_prods_df.select("product_category").distinct().collect()])
+            cluster_ids = sorted([row["prediction"] for row in clustered_prods_df.select("prediction").distinct().collect()])
         except Exception as e:
-            unique_cats = []
-            st.warning(f"Không thể tải danh sách sản phẩm từ model đã lưu: {e}")
+            unique_cats = []; cluster_ids = []
+            st.warning(f"Không thể tải danh sách sản phẩm/cụm từ model đã lưu: {e}")
 
-        if unique_cats:
-            selected_category = st.selectbox("Chọn Sản phẩm:", sorted(unique_cats), key="select_product_rec")
-            if st.button("🔍 Tìm gợi ý", key="find_recommend"):
-                 with st.spinner("Đang tìm sản phẩm tương tự..."):
-                    try:
-                        selected_row = clustered_prods_df.filter(col("product_category") == selected_category).select("prediction").first()
-                        if selected_row: selected_cluster = selected_row["prediction"]
-                        else: st.error(f"Lỗi: Không tìm thấy cụm cho '{selected_category}'."); st.stop()
-                        
-                        recommendations = (clustered_prods_df
-                                           .filter((col("prediction") == selected_cluster) & (col("product_category") != selected_category))
-                                           .select("product_category", "avg_price", "avg_quantity", "total_revenue", "avg_returns_rate")
-                                           .orderBy(F.desc("total_revenue"))
-                                           .limit(5))
-                        rec_count = recommendations.count() # Check count before toPandas
-                        if rec_count > 0:
-                            rec_pdf = recommendations.toPandas()
-                            st.markdown(f"**Gợi ý cho '{selected_category}' (từ Cụm {selected_cluster})**")
-                            st.dataframe(rec_pdf, use_container_width=True, column_config={
-                                "product_category": "Sản phẩm gợi ý", "avg_price": "Giá TB", "avg_quantity": "SL TB",
-                                "total_revenue": "Doanh thu", "avg_returns_rate": "Tỉ lệ trả TB"})
-                        else: st.warning("Không tìm thấy sản phẩm tương tự trong cùng cụm.")
-                    except Exception as e: st.error(f"Lỗi khi tìm gợi ý: {e}"); st.code(traceback.format_exc())
-        else: st.warning("Không có dữ liệu sản phẩm trong model để chọn.")
+        rec_method = st.radio("Chọn phương thức gợi ý:", ("Theo Sản phẩm", "Theo Cụm"), key="rec_method_radio")
+
+        if rec_method == "Theo Sản phẩm":
+            if unique_cats:
+                selected_category = st.selectbox("Chọn Sản phẩm:", unique_cats, key="select_product_rec")
+                if st.button("🔍 Tìm gợi ý tương tự", key="find_recommend_product"):
+                     with st.spinner("Đang tìm sản phẩm tương tự..."):
+                        try:
+                            selected_row = clustered_prods_df.filter(col("product_category") == selected_category).select("prediction").first()
+                            if selected_row: selected_cluster = selected_row["prediction"]
+                            else: st.error(f"Lỗi: Không tìm thấy cụm cho '{selected_category}'."); st.stop()
+                            recommendations = (clustered_prods_df
+                                               .filter((col("prediction") == selected_cluster) & (col("product_category") != selected_category))
+                                               .select("product_category", "avg_price", "avg_quantity", "total_revenue", "avg_returns_rate")
+                                               .orderBy(F.desc("total_revenue")).limit(10))
+                            rec_count = recommendations.count()
+                            if rec_count > 0:
+                                rec_pdf = recommendations.toPandas()
+                                st.markdown(f"**Gợi ý cho '{selected_category}' (từ Cụm {selected_cluster})**")
+                                st.dataframe(rec_pdf, use_container_width=True, column_config={ "product_category": "Sản phẩm gợi ý", "avg_price": "Giá TB", "avg_quantity": "SL TB", "total_revenue": "Doanh thu", "avg_returns_rate": "Tỉ lệ trả TB"})
+                            else: st.warning("Không tìm thấy sản phẩm tương tự trong cùng cụm.")
+                        except Exception as e: st.error(f"Lỗi khi tìm gợi ý: {e}"); st.code(traceback.format_exc())
+            else: st.warning("Không có dữ liệu sản phẩm trong model để chọn.")
+
+        elif rec_method == "Theo Cụm":
+            if cluster_ids:
+                selected_cluster_id = st.selectbox("Chọn ID Cụm:", cluster_ids, key="select_cluster_rec", format_func=lambda x: f"Cụm {x}")
+                if st.button("📊 Hiển thị sản phẩm trong cụm", key="find_recommend_cluster"):
+                    with st.spinner(f"Đang lấy sản phẩm từ Cụm {selected_cluster_id}..."):
+                         try:
+                             products_in_cluster = (clustered_prods_df
+                                                    .filter(col("prediction") == selected_cluster_id)
+                                                    .select("product_category", "avg_price", "avg_quantity", "total_revenue", "avg_returns_rate")
+                                                    .orderBy(F.desc("total_revenue")))
+                             prod_count = products_in_cluster.count()
+                             if prod_count > 0:
+                                 prods_pdf = products_in_cluster.limit(50).toPandas()
+                                 st.markdown(f"**Sản phẩm trong Cụm {selected_cluster_id} (tối đa 50, sắp xếp theo doanh thu)**")
+                                 st.dataframe(prods_pdf, use_container_width=True, column_config={ "product_category": "Sản phẩm", "avg_price": "Giá TB", "avg_quantity": "SL TB", "total_revenue": "Doanh thu", "avg_returns_rate": "Tỉ lệ trả TB"})
+                                 if prod_count > 50: st.caption(f"... và {prod_count - 50} sản phẩm khác.")
+                             else: st.warning(f"Không tìm thấy sản phẩm nào trong Cụm {selected_cluster_id}.")
+                         except Exception as e: st.error(f"Lỗi khi lấy sản phẩm theo cụm: {e}"); st.code(traceback.format_exc())
+            else: st.warning("Không có ID cụm nào được tìm thấy trong model.")
